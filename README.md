@@ -46,6 +46,7 @@ pip install --upgrade setuptools
 pip install -e .[base]
 pip install --no-build-isolation flash-attn==2.7.1.post4
 pip install --upgrade jax jaxlib ml_dtypes
+pip install tokenizers
 ```
 > 다음 에러는 무시해도 됨:
 "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
