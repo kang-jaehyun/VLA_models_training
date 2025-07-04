@@ -168,7 +168,7 @@ tensorstore 0.1.75 requires ml_dtypes>=0.5.0, but you have ml-dtypes 0.2.0 which
    ```sh
    huggingface-cli login
    ```
-   * https://huggingface.co/settings/tokens 에서 token 발급 후 입력: david개인 token (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)
+   * https://huggingface.co/settings/tokens 에서 token 발급 후 입력
    
    #### 1-1-3. state, action 데이터 변환 스크립트
    https://rlwrld.slack.com/files/U08SQQ41RFC/F08UTDE0M5W/lift_dataset_convert.ipynb?origin_team=T077WTVBF8W&origin_channel=D08SQNR9JS2
