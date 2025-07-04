@@ -323,7 +323,7 @@ bin/python packages/pi0/pi0_control.py --data-config allex_cube --env-name LiftO
 ### univla-1-4. 추론 실행
 ```sh
 source packages/univla/.venv/bin/activate
-bin/python packages/univla/univla_control.py --data-config allex_cube --env-name LiftOurs --policy-path /virtual_lab/rlwrld/david/UniVLA/vla_scripts/runs/univla-7b+real_world+b32+lr-0.00035+lora-r32+dropout-0.0--allex_state_action_filter_single_view=w-LowLevelDecoder-ws-12 --checkpoint-step 20000 --task-instruction "Lift the cube from the left stand and place it on the right stand." --episode-horizon 1000 --save-log true --save-video true --no-render --fps 20
+bin/python packages/univla/univla_control.py --data-config allex_cube --env-name LiftOurs --robot-name Allex --policy-path /virtual_lab/rlwrld/david/UniVLA/vla_scripts/runs/univla-7b+real_world+b32+lr-0.00035+lora-r32+dropout-0.0--allex_state_action_filter_single_view=w-LowLevelDecoder-ws-12 --checkpoint-step 20000 --task-instruction "Lift the cube from the left stand and place it on the right stand." --episode-horizon 1000 --save-log true --save-video true --no-render --fps 20
 ```
 -------------------------------------
 -------------------------------------
