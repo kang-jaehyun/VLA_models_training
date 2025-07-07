@@ -125,7 +125,8 @@ class ManualDataset(torch.utils.data.Dataset):
             episode_len = len(np.load(episode_path / "action.npy"))
             if episode_len > window_size:
                 self.episodes.append({'path': episode_path, 'len': episode_len})
-
+        self.image_transform_lam = transforms.ToTensor()
+        self.resize_img = transforms.Resize((224, 224))
     def __len__(self):
         return len(self.episodes)
 
@@ -134,8 +135,13 @@ class ManualDataset(torch.utils.data.Dataset):
         episode_path = episode_info['path']
         episode_len = episode_info['len']
 
-        start_idx = random.randint(0, episode_len - self.window_size - 1)
-        end_idx = start_idx + self.window_size
+        extra_frame_num = random.randint(0, 1)
+        image_index = np.random.choice(episode_len - self.window_size - extra_frame_num) + 1 # filename starts from 001
+
+        # start_idx = random.randint(0, episode_len - self.window_size - 1)
+        # end_idx = start_idx + self.window_size
+        start_idx = image_index + extra_frame_num
+        end_idx = image_index + self.window_size + extra_frame_num
         
         full_state = np.load(episode_path / "state.npy")[start_idx]
         state_filtered = full_state[INDICES_FOR_STATE]
@@ -154,20 +160,24 @@ class ManualDataset(torch.utils.data.Dataset):
         with open(episode_path / "instruction.txt", "r") as f:
             instruction = f.read().strip()
 
-        main_image_path = episode_path / f"frame_{start_idx + 1:03d}.png"
+        main_image_path = episode_path / f"frame_{start_idx:03d}.png"
         pixel_values = self.image_transform(Image.open(main_image_path).convert("RGB"))
 
-        resize_to_224 = transforms.Resize((224, 224))
-        to_tensor = transforms.ToTensor()
-        initial_pixel_values = to_tensor(resize_to_224(Image.open(main_image_path).convert("RGB")))
-        target_frame_path = episode_path / f"frame_{end_idx:03d}.png"
-        target_pixel_values = to_tensor(resize_to_224(Image.open(target_frame_path).convert("RGB")))
+        initial_pixel_values = self.image_transform_lam(self.resize_img(Image.open(main_image_path).convert("RGB")))
+        target_frame_path = episode_path / f"frame_{end_idx-1:03d}.png"
+        target_pixel_values = self.image_transform_lam(self.resize_img(Image.open(target_frame_path).convert("RGB")))
+
+        initial_pixel_values_hist, target_pixel_values_hist = None, None
+        if extra_frame_num > 0:
+            hist_frame_prev = Image.open(episode_path / f"frame_{start_idx-extra_frame_num:03d}.png").convert("RGB")
+            hist_frame_goal = Image.open(episode_path / f"frame_{end_idx-1-extra_frame_num:03d}.png").convert("RGB")
+            initial_pixel_values_hist = self.image_transform_lam(self.resize_img(hist_frame_prev))
+            target_pixel_values_hist = self.image_transform_lam(self.resize_img(hist_frame_goal))
 
         return dict(
             pixel_values=pixel_values, actions=actions_tensor, lang=instruction, proprio=states_tensor,
             initial_pixel_values=initial_pixel_values, target_pixel_values=target_pixel_values,
-            initial_pixel_values_hist=None, target_pixel_values_hist=None,
-            with_hist=torch.tensor(False),
+            initial_pixel_values_hist=initial_pixel_values_hist, target_pixel_values_hist=target_pixel_values_hist,
         )
 
 def load_data_manual(dataset_dir, batch_size, processor, window_size):
