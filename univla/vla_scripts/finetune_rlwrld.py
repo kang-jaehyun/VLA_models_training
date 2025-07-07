@@ -81,6 +81,7 @@ INDICES_FOR_ACTION = [0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17]
 STATE_DIM = len(INDICES_FOR_STATE)
 ACTION_DIM = len(INDICES_FOR_ACTION)
 
+ACTION_HISTORY_LEN = 5
 # ==============================================================================
 # 커스텀 데이터 처리 함수 및 클래스
 # ==============================================================================
@@ -124,50 +125,98 @@ class ManualDataset(torch.utils.data.Dataset):
             episode_len = len(np.load(episode_path / "action.npy"))
             if episode_len > window_size:
                 self.episodes.append({'path': episode_path, 'len': episode_len})
+        self.hist_len = ACTION_HISTORY_LEN
+        self.image_transform_lam = transforms.ToTensor()
+        self.resize_img = transforms.Resize((224, 224))
 
     def __len__(self):
         return len(self.episodes)
 
     def __getitem__(self, idx):
+        """
+        하나의 샘플을 반환한다.
+
+        반환 키
+        ----------
+        pixel_values            : Tensor(C, H, W)         # 메인 프레임 (VLA 입력용)
+        actions                 : Tensor(window, A)       # 예측 타깃(정규화)
+        action_hist             : Tensor(H_len, A)        # 과거 액션 히스토리(정규화+패딩)
+        proprio                 : Tensor(S,)             # 현재 프로프리오(정규화)
+        lang                    : str                     # 자연어 instruction
+        initial_pixel_values    : Tensor(3, 224, 224)     # 메인 프레임 (영상용)
+        target_pixel_values     : Tensor(3, 224, 224)     # window 마지막 프레임 (영상용)
+        """
         episode_info = self.episodes[idx]
-        episode_path = episode_info['path']
-        episode_len = episode_info['len']
+        episode_path = episode_info["path"]
+        episode_len  = episode_info["len"]
 
-        start_idx = random.randint(0, episode_len - self.window_size - 1)
-        end_idx = start_idx + self.window_size
-        
-        full_state = np.load(episode_path / "state.npy")[start_idx]
+        # ─────────────────────── 랜덤 시작 인덱스 (extra frame X) ────────────
+        start_idx = np.random.choice(episode_len - self.window_size) + 1   # 1-based 파일명
+        end_idx   = start_idx + self.window_size
+
+        # ────────────────────────────── STATE ──────────────────────────────
+        full_state     = np.load(episode_path / "state.npy")[start_idx]
         state_filtered = full_state[INDICES_FOR_STATE]
-        state_mean = np.array(self.norm_stats["state_mean"])[INDICES_FOR_STATE]
-        state_std = np.array(self.norm_stats["state_std"])[INDICES_FOR_STATE]
-        state_normalized = (state_filtered - state_mean) / state_std
-        states_tensor = torch.from_numpy(state_normalized).float()
+        state_mean     = np.asarray(self.norm_stats["state_mean"])[INDICES_FOR_STATE]
+        state_std      = np.asarray(self.norm_stats["state_std"])[INDICES_FOR_STATE]
+        state_norm     = (state_filtered - state_mean) / state_std
+        states_tensor  = torch.from_numpy(state_norm).float()
 
-        full_actions = np.load(episode_path / "action.npy")[start_idx:end_idx]
+        # ───────────────────────────── ACTION(window) ──────────────────────
+        full_actions     = np.load(episode_path / "action.npy")[start_idx:end_idx]
         actions_filtered = full_actions[:, INDICES_FOR_ACTION]
-        action_mean = np.array(self.norm_stats["action_mean"])[INDICES_FOR_ACTION]
-        action_std = np.array(self.norm_stats["action_std"])[INDICES_FOR_ACTION]
-        actions_normalized = (actions_filtered - action_mean) / action_std
-        actions_tensor = torch.from_numpy(actions_normalized).float()
+        action_mean      = np.asarray(self.norm_stats["action_mean"])[INDICES_FOR_ACTION]
+        action_std       = np.asarray(self.norm_stats["action_std"])[INDICES_FOR_ACTION]
+        actions_norm     = (actions_filtered - action_mean) / action_std
+        actions_tensor   = torch.from_numpy(actions_norm).float()
 
+        # ─────────────────────── ACTION HISTORY (H_len) ────────────────────
+        hist_end   = start_idx
+        hist_start = max(0, hist_end - self.hist_len)
+        hist_raw   = np.load(episode_path / "action.npy")[hist_start:hist_end][:, INDICES_FOR_ACTION]
+        hist_norm  = (hist_raw - action_mean) / action_std
+
+        # 길이 부족 시 0-패딩 (과거 방향)
+        if hist_norm.shape[0] < self.hist_len:
+            pad_rows = self.hist_len - hist_norm.shape[0]
+            pad = np.zeros((pad_rows, ACTION_DIM), dtype=hist_norm.dtype)
+            hist_norm = np.vstack([pad, hist_norm])
+
+        hist_tensor = torch.from_numpy(hist_norm).float()
+
+        # ───────────────────────────── INSTRUCTION ─────────────────────────
         with open(episode_path / "instruction.txt", "r") as f:
             instruction = f.read().strip()
 
-        main_image_path = episode_path / f"frame_{start_idx + 1:03d}.png"
-        pixel_values = self.image_transform(Image.open(main_image_path).convert("RGB"))
+        # ────────────────────────────── IMAGES ─────────────────────────────
+        main_img = Image.open(episode_path / f"frame_{start_idx:03d}.png").convert("RGB")
+        tgt_img  = Image.open(episode_path / f"frame_{end_idx-1:03d}.png").convert("RGB")
 
-        resize_to_224 = transforms.Resize((224, 224))
-        to_tensor = transforms.ToTensor()
-        initial_pixel_values = to_tensor(resize_to_224(Image.open(main_image_path).convert("RGB")))
-        target_frame_path = episode_path / f"frame_{end_idx:03d}.png"
-        target_pixel_values = to_tensor(resize_to_224(Image.open(target_frame_path).convert("RGB")))
+        pixel_values         = self.image_transform(main_img)
+        initial_pixel_values = self.image_transform_lam(self.resize_img(main_img))
+        target_pixel_values  = self.image_transform_lam(self.resize_img(tgt_img))
 
-        return dict(
-            pixel_values=pixel_values, actions=actions_tensor, lang=instruction, proprio=states_tensor,
-            initial_pixel_values=initial_pixel_values, target_pixel_values=target_pixel_values,
-            initial_pixel_values_hist=None, target_pixel_values_hist=None,
-            with_hist=torch.tensor(False),
-        )
+        # ───────────────────────────── RETURN ──────────────────────────────
+        return {
+            "pixel_values": pixel_values,
+            "actions": actions_tensor,
+            "action_hist": hist_tensor,
+            "proprio": states_tensor,
+            "lang": instruction,
+            "initial_pixel_values": initial_pixel_values,
+            "target_pixel_values": target_pixel_values,
+            "initial_pixel_values_hist": None, # no hist
+            "target_pixel_values_hist": None, # no hist
+        }
+
+class CustomCollator(PaddedCollatorForActionPrediction):
+    """원본 collator + action_hist 스택"""
+    def __call__(self, batch):
+        base = super().__call__(batch)            # 기존 keys 처리
+        # action_hist: 리스트[Tensor(H,A)]  →  Tensor(B,H,A)
+        hist = torch.stack([item["action_hist"] for item in batch])
+        base["action_hist"] = hist
+        return base
 
 def load_data_manual(dataset_dir, batch_size, processor, window_size):
     norm_stats = get_norm_stats_from_files(dataset_dir)
@@ -175,7 +224,7 @@ def load_data_manual(dataset_dir, batch_size, processor, window_size):
         root_dir=dataset_dir, norm_stats=norm_stats, window_size=window_size,
         image_transform=processor.image_processor.apply_transform,
     )
-    collator = PaddedCollatorForActionPrediction(
+    collator = CustomCollator(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
     dataloader = DataLoader(
@@ -194,16 +243,29 @@ class ActionDecoderHead(torch.nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
+        self.hist_proj = nn.Sequential(
+            nn.Flatten(),                                        # (B,H,A) → (B,H*A)
+            nn.Linear(ACTION_HISTORY_LEN * ACTION_DIM, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
         self.proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, window_size * ACTION_DIM)
+            nn.Linear(hidden_dim * 3, window_size * ACTION_DIM)
         )
 
-    def forward(self, latent_action_tokens, visual_embed, proprio):
+    def forward(self, latent_action_tokens, visual_embed, proprio, action_hist):
         # 수정: 추론 코드와 동일하게 마지막 4개 토큰만 사용하도록 로직 추가
         latent_action_tokens = latent_action_tokens[:, -4:]
         proprio = self.proprio_proj(proprio)
         visual_embed = self.visual_pool(visual_embed)
-        action = self.proj(torch.cat([self.attn_pool(latent_action_tokens, init_embed=visual_embed), proprio], dim=-1))
+        hist_feat = self.hist_proj(action_hist)
+        concat = torch.cat(
+            [self.attn_pool(latent_action_tokens, init_embed=visual_embed),
+             proprio,
+             hist_feat],
+            dim=-1,
+        )
+        action = self.proj(concat)
         return action
 
 
@@ -249,7 +311,8 @@ class Wrapped_Model(torch.nn.Module):
         pred_action = self.action_decoder(
             latent_action_tokens, 
             visual_embed, 
-            batch['proprio'] # <--- proprio 전달 다시 추가
+            batch['proprio'],
+            batch["action_hist"],
         ).reshape(-1, self.window_size, ACTION_DIM) # <--- 차원을 ACTION_DIM (21)으로
 
         loss = torch.nn.functional.l1_loss(pred_action, batch['actions'], reduction='none')
@@ -472,7 +535,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 batch["pixel_values"] = batch["pixel_values"].to(torch.bfloat16).to(device_id)
                 batch['actions'] = batch['actions'].to(device_id)
                 batch['proprio'] = batch['proprio'].to(device_id)
-
+                batch["action_hist"]  = batch["action_hist"].to(device_id)
                 ### [TODO] We construct latent action labels (also history latent actions) on-the-fly
                 ### This is a work-round of potential CUDA conflict of calling models in dataloader
                 if len(batch["initial_pixel_values_hist"]) > 1:
