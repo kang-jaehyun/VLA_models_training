@@ -174,15 +174,24 @@ class ManualDataset(torch.utils.data.Dataset):
         hist_end   = start_idx
         hist_start = max(0, hist_end - self.hist_len)
         hist_raw   = np.load(episode_path / "action.npy")[hist_start:hist_end][:, INDICES_FOR_ACTION]
-        hist_norm  = (hist_raw - action_mean) / action_std
+        valid_len  = hist_raw.shape[0]                              # 패딩 전 길이
 
-        # 길이 부족 시 0-패딩 (과거 방향)
-        if hist_norm.shape[0] < self.hist_len:
-            pad_rows = self.hist_len - hist_norm.shape[0]
-            pad = np.zeros((pad_rows, ACTION_DIM), dtype=hist_norm.dtype)
-            hist_norm = np.vstack([pad, hist_norm])
+        # --- Gaussian noise (원 스케일) ---------------------------------
+        if valid_len > 0:
+            noise = np.random.randn(*hist_raw.shape) * action_std   # σ·ε
+            hist_raw_noisy = hist_raw + noise
+        else:
+            hist_raw_noisy = hist_raw                                # (edge case)
 
-        hist_tensor = torch.from_numpy(hist_norm).float()
+        # 길이 부족 시 0-패딩 (과거 방향) -------------------------------
+        if valid_len < self.hist_len:
+            pad_rows = self.hist_len - valid_len
+            pad = np.zeros((pad_rows, ACTION_DIM), dtype=hist_raw_noisy.dtype)
+            hist_raw_noisy = np.vstack([pad, hist_raw_noisy])
+
+        # 정규화 ---------------------------------------------------------
+        hist_noisy_norm = (hist_raw_noisy - action_mean) / action_std
+        hist_tensor = torch.from_numpy(hist_noisy_norm).float()      # (H_len, A)
 
         # ───────────────────────────── INSTRUCTION ─────────────────────────
         with open(episode_path / "instruction.txt", "r") as f:
