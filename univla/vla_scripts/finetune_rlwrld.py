@@ -71,8 +71,7 @@ import json
 # DATA_DIR = "/virtual_lab/rlwrld/david/pi_0_fast/openpi/data/rlwrld_dataset/gr1-cube-dataset_single_view_converted_state_action"
 # CHECKOUT_NAME = "gr1_state_action_filter_single_view"
 
-DATA_DIR = "/virtual_lab/rlwrld/david/pi_0_fast/openpi/data/rlwrld_dataset/gr1-cube-dataset_side_view_converted_state_action"
-CHECKOUT_NAME = "gr1_state_action_filter_side_view"
+# DATA_DIR = "/virtual_lab/rlwrld/david/pi_0_fast/openpi/data/rlwrld_dataset/gr1-cube-dataset_side_view_converted_state_action"
 
 # ### 데이터에서 오른팔 및 손 움직임만 훈련하기 위해 인덱스 설정
 INDICES_FOR_STATE = list(range(13)) + list(range(20, 31))
@@ -274,26 +273,24 @@ class Wrapped_Model(torch.nn.Module):
 class FinetuneConfig:
     # Directory Paths
     # data_root_dir: Path = Path("/path/to/your/local/hdf5_data")     # Path to Open-X dataset directory
-    data_root_dir: Path = DATA_DIR     # Path to Open-X dataset directory
+    data_root_dir: Path = Path("/virtual_lab/rlwrld/jaehyun/datasets/omni-pilot-datasets/gr1-cube-dataset_side_view_converted_state_action")     # Path to Open-X dataset directory
 
     # vla_path: str = "/path/to/your/pretrained-univla-7b"            # Path to your local UniVLA path
-    vla_path: str = "./univla-7b"            # Path to your local UniVLA path
-    
-    # lam_path: str = "latent_action_model/logs/task_centric_lam_stage2/epoch=0-step=200000.ckpt"
-    lam_path: str = "./univla-latent-action-model/lam-stage-2.ckpt"
+    vla_path: str = "/virtual_lab/rlwrld/jaehyun/datasets/univla-7b"            # Path to your local UniVLA path
+    lam_path: str = "/virtual_lab/rlwrld/jaehyun/datasets/univla-latent-action-model/lam-stage-2.ckpt"
     dataset_name: str = "real_world"                                    # Name of fine-tuning dataset (e.g., `droid_wipe`)
     run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
     adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
     # Fine-tuning Parameters
-    batch_size: int = 16                                             # Fine-tuning batch size
+    batch_size: int = 8                                             # Fine-tuning batch size
     max_steps: int = 30001                                          # Max number of fine-tuning steps
     save_steps: int = 5000                                          # Interval for checkpoint saving
     learning_rate: float = 3.5e-4                                   # Fine-tuning learning rate
     grad_accumulation_steps: int = 2                                # Gradient accumulation steps
     image_aug: bool = False                                         # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_00                               # Dataloader shuffle buffer size (can reduce if OOM)
-    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
+    save_latest_checkpoint_only: bool = False                        # Whether to save only one checkpoint per run and
                                                                     #   continually overwrite the latest checkpoint
                                                                     #   (If False, saves all checkpoints)
     # LAM setting
@@ -320,8 +317,8 @@ class FinetuneConfig:
 
     # Tracking Parameters
     wandb_project: str = "univla-finetune"                          # Name of W&B project to log to (use default!)
-    wandb_entity: str = "joonwoo-ahn"                              # Name of entity to log under
-    run_id_note: Optional[str] = CHECKOUT_NAME                               # Extra note for logging, Weights & Biases
+    wandb_entity: str = "jaehyunkang"                              # Name of entity to log under
+    run_id_note: Optional[str] = ""                               # Extra note for logging, Weights & Biases
     # run_id_note: Optional[str] = "norm_stats"
 
 
