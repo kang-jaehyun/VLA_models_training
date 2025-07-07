@@ -448,6 +448,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=4) # <-- json.dump 사용
 
+    if distributed_state.is_main_process:
+        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{exp_id}")
+
     wrapped_model, latent_action_model, optimizer, scheduler, dataloader = accelerator.prepare(
         wrapped_model, latent_action_model, optimizer, scheduler, dataloader
     )
@@ -609,6 +612,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                 smoothened_loss = sum(recent_losses) / len(recent_losses)
                 smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
 
+                if distributed_state.is_main_process and gradient_step_idx % 5 == 0:
+                    wandb.log(
+                        {
+                            "train_loss": smoothened_loss,
+                            "latent_action_accuracy": smoothened_action_accuracy,
+                            "action_loss": act_loss.item(),
+                            "action_loss_1step": loss_one_step.item(),
+                            "lr": optimizer.state_dict()['param_groups'][0]['lr'],
+                        },
+                        step=gradient_step_idx,
+                    )
+
                 # Optimizer Step
                 if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                     optimizer.step()
@@ -667,7 +682,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     # 모든 프로세스가 병합 및 저장이 끝날 때까지 기다립니다.
                     dist.barrier()
 
-            description = f"Epoch {current_step + 1} | action_loss: {act_loss.item():.4f} | acc: {smoothened_action_accuracy:.4f}"
+            description = f"Step {current_step + 1} | train_loss: {smoothened_loss:.3f} | latent_action_accuracy: {smoothened_action_accuracy:.3f} | action_loss: {act_loss.item():.3f} | action_loss_1step: {loss_one_step.item():.3f}"
             progress.set_description(description)
 
             current_step = gradient_step_idx + 1 + current_step
