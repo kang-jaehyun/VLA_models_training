@@ -536,230 +536,228 @@ def finetune(cfg: FinetuneConfig) -> None:
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         wrapped_model.train()
         optimizer.zero_grad()
-        current_step = 0
-        while current_step < cfg.max_steps:
-            for batch_idx, batch in enumerate(dataloader):
-                batch["initial_pixel_values"] = batch["initial_pixel_values"].to(device_id)
-                batch["target_pixel_values"] = batch["target_pixel_values"].to(device_id)
-                batch["pixel_values"] = batch["pixel_values"].to(torch.bfloat16).to(device_id)
-                batch['actions'] = batch['actions'].to(device_id)
-                batch['proprio'] = batch['proprio'].to(device_id)
-                batch["action_hist"]  = batch["action_hist"].to(device_id)
-                ### [TODO] We construct latent action labels (also history latent actions) on-the-fly
-                ### This is a work-round of potential CUDA conflict of calling models in dataloader
-                if len(batch["initial_pixel_values_hist"]) > 1:
-                    batch["initial_pixel_values_hist"] = batch["initial_pixel_values_hist"].to(device_id)
-                    batch["target_pixel_values_hist"] = batch["target_pixel_values_hist"].to(device_id)
 
-                    with torch.no_grad():
-                        video = torch.stack([batch["initial_pixel_values"], batch["target_pixel_values"]], dim=1)
-                        latent_action_idx_batch = latent_action_model.module.vq_encode(video)['indices'].squeeze()
-                        video = torch.stack([batch["initial_pixel_values_hist"], batch["target_pixel_values_hist"]], dim=1)
-                        latent_action_idx_history = latent_action_model.module.vq_encode(video)['indices'].squeeze()
+        for batch_idx, batch in enumerate(dataloader):
+            batch["initial_pixel_values"] = batch["initial_pixel_values"].to(device_id)
+            batch["target_pixel_values"] = batch["target_pixel_values"].to(device_id)
+            batch["pixel_values"] = batch["pixel_values"].to(torch.bfloat16).to(device_id)
+            batch['actions'] = batch['actions'].to(device_id)
+            batch['proprio'] = batch['proprio'].to(device_id)
+            batch["action_hist"]  = batch["action_hist"].to(device_id)
+            ### [TODO] We construct latent action labels (also history latent actions) on-the-fly
+            ### This is a work-round of potential CUDA conflict of calling models in dataloader
+            if len(batch["initial_pixel_values_hist"]) > 1:
+                batch["initial_pixel_values_hist"] = batch["initial_pixel_values_hist"].to(device_id)
+                batch["target_pixel_values_hist"] = batch["target_pixel_values_hist"].to(device_id)
 
-                    input_ids_list = []
-                    labels_list = []
-                    hist_idx = 0
-                    # print(batch['with_hist'],latent_action_idx_history.shape)
-                    for idx, latent_action_idx in enumerate(latent_action_idx_batch):
-                        action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
-                        action_tokens = ''
+                with torch.no_grad():
+                    video = torch.stack([batch["initial_pixel_values"], batch["target_pixel_values"]], dim=1)
+                    latent_action_idx_batch = latent_action_model.module.vq_encode(video)['indices'].squeeze()
+                    video = torch.stack([batch["initial_pixel_values_hist"], batch["target_pixel_values_hist"]], dim=1)
+                    latent_action_idx_history = latent_action_model.module.vq_encode(video)['indices'].squeeze()
+
+                input_ids_list = []
+                labels_list = []
+                hist_idx = 0
+                # print(batch['with_hist'],latent_action_idx_history.shape)
+                for idx, latent_action_idx in enumerate(latent_action_idx_batch):
+                    action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
+                    action_tokens = ''
+                    for i, action in enumerate(action_vocab):
+                        action_tokens += action
+                    
+                    if batch['with_hist'][idx]:
+                        action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx_history[hist_idx]]
+
+                        hist_action_tokens = ''
                         for i, action in enumerate(action_vocab):
-                            action_tokens += action
-                        
-                        if batch['with_hist'][idx]:
-                            action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx_history[hist_idx]]
+                            hist_action_tokens += action
 
-                            hist_action_tokens = ''
-                            for i, action in enumerate(action_vocab):
-                                hist_action_tokens += action
-
-                            input_prompt = f"What action should the robot take to {batch['instructions'][idx].lower()}? History action " + hist_action_tokens
-                            hist_idx += 1
-                        else:
-                            input_prompt = f"What action should the robot take to {batch['instructions'][idx].lower()}?"
+                        input_prompt = f"What action should the robot take to {batch['instructions'][idx].lower()}? History action " + hist_action_tokens
+                        hist_idx += 1
+                    else:
+                        input_prompt = f"What action should the robot take to {batch['instructions'][idx].lower()}?"
 
 
-                        # Add instruction to VLA prompt
-                        prompt_builder = PurePromptBuilder("openvla")
-                        conversation = [
-                            {"from": "human", "value": input_prompt},
-                            {"from": "gpt", "value": action_tokens},
-                        ]
-                        for turn in conversation:
-                            prompt_builder.add_turn(turn["from"], turn["value"])
+                    # Add instruction to VLA prompt
+                    prompt_builder = PurePromptBuilder("openvla")
+                    conversation = [
+                        {"from": "human", "value": input_prompt},
+                        {"from": "gpt", "value": action_tokens},
+                    ]
+                    for turn in conversation:
+                        prompt_builder.add_turn(turn["from"], turn["value"])
 
-                        # Tokenize (w/ `base_tokenizer`)
-                        input_ids = processor.tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-                        labels = list(input_ids)
+                    # Tokenize (w/ `base_tokenizer`)
+                    input_ids = processor.tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+                    labels = list(input_ids)
 
-                        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-                        #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
-                        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+                    # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+                    #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+                    input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
 
-                        labels[: -(len(action_vocab) + 1)] = -100
+                    labels[: -(len(action_vocab) + 1)] = -100
 
-                        input_ids_list.append(input_ids)
-                        labels_list.append(labels)
-                
-                else:
-                    with torch.no_grad():
-                        video = torch.stack([batch["initial_pixel_values"], batch["target_pixel_values"]], dim=1)
-                        latent_action_idx_batch = latent_action_model.module.vq_encode(video)['indices'].squeeze()
+                    input_ids_list.append(input_ids)
+                    labels_list.append(labels)
+            
+            else:
+                with torch.no_grad():
+                    video = torch.stack([batch["initial_pixel_values"], batch["target_pixel_values"]], dim=1)
+                    latent_action_idx_batch = latent_action_model.module.vq_encode(video)['indices'].squeeze()
 
-                    input_ids_list = []
-                    labels_list = []
-                    for idx, latent_action_idx in enumerate(latent_action_idx_batch):
-                        action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
+                input_ids_list = []
+                labels_list = []
+                for idx, latent_action_idx in enumerate(latent_action_idx_batch):
+                    action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
 
-                        action_tokens = ''
-                        for i, action in enumerate(action_vocab):
-                            action_tokens += action
+                    action_tokens = ''
+                    for i, action in enumerate(action_vocab):
+                        action_tokens += action
 
-                        # Add instruction to VLA prompt
-                        prompt_builder = PurePromptBuilder("openvla")
-                        conversation = [
-                            {"from": "human", "value": f"What action should the robot take to {batch['instructions'][idx].lower()}?"},
-                            {"from": "gpt", "value": action_tokens},
-                        ]
-                        for turn in conversation:
-                            prompt_builder.add_turn(turn["from"], turn["value"])
+                    # Add instruction to VLA prompt
+                    prompt_builder = PurePromptBuilder("openvla")
+                    conversation = [
+                        {"from": "human", "value": f"What action should the robot take to {batch['instructions'][idx].lower()}?"},
+                        {"from": "gpt", "value": action_tokens},
+                    ]
+                    for turn in conversation:
+                        prompt_builder.add_turn(turn["from"], turn["value"])
 
-                        # Tokenize (w/ `base_tokenizer`)
-                        input_ids = processor.tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-                        labels = list(input_ids)
+                    # Tokenize (w/ `base_tokenizer`)
+                    input_ids = processor.tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+                    labels = list(input_ids)
 
-                        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
-                        #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
-                        input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
+                    # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+                    #   =>> IMPORTANT :: IF WE'RE USING HF .forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+                    input_ids, labels = torch.tensor(input_ids), torch.tensor(labels)
 
-                        labels[: -(len(action_vocab) + 1)] = -100
+                    labels[: -(len(action_vocab) + 1)] = -100
 
-                        input_ids_list.append(input_ids)
-                        labels_list.append(labels)
+                    input_ids_list.append(input_ids)
+                    labels_list.append(labels)
 
-                input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=processor.tokenizer.pad_token_id)
-                labels = pad_sequence(labels_list, batch_first=True, padding_value=-100)
+            input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=processor.tokenizer.pad_token_id)
+            labels = pad_sequence(labels_list, batch_first=True, padding_value=-100)
 
-                # Truncate (if necessary)
-                input_ids, labels = input_ids[:, : processor.tokenizer.model_max_length], labels[:, : processor.tokenizer.model_max_length]
+            # Truncate (if necessary)
+            input_ids, labels = input_ids[:, : processor.tokenizer.model_max_length], labels[:, : processor.tokenizer.model_max_length]
 
-                # Get `attention_mask` by checking for `pad_token_id`
-                attention_mask = input_ids.ne(processor.tokenizer.pad_token_id)
+            # Get `attention_mask` by checking for `pad_token_id`
+            attention_mask = input_ids.ne(processor.tokenizer.pad_token_id)
 
-                batch["input_ids"] = input_ids
-                batch["attention_mask"] = attention_mask
-                batch["labels"] = labels
+            batch["input_ids"] = input_ids
+            batch["attention_mask"] = attention_mask
+            batch["labels"] = labels
 
-                output, act_loss, loss_one_step, latent_action_tokens = wrapped_model(batch)
+            output, act_loss, loss_one_step, latent_action_tokens = wrapped_model(batch)
 
-                loss = act_loss if cfg.freeze_vla else act_loss + output.loss
-                # Normalize loss to account for gradient accumulation
-                normalized_loss = loss / cfg.grad_accumulation_steps
+            loss = act_loss if cfg.freeze_vla else act_loss + output.loss
+            # Normalize loss to account for gradient accumulation
+            normalized_loss = loss / cfg.grad_accumulation_steps
 
-                torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=0.3)
-                # Backward pass
-                normalized_loss.backward()
+            torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=0.3)
+            # Backward pass
+            normalized_loss.backward()
 
-                # Compute Accuracy and L1 Loss for Logging
-                action_logits = output.logits[:, wrapped_model.module.vla.vision_backbone.featurizer.patch_embed.num_patches : -1]
-                action_preds = action_logits.argmax(dim=2)
-                action_gt = batch["labels"][:, 1:].to(action_preds.device)
-                mask = action_gt > 32000
+            # Compute Accuracy and L1 Loss for Logging
+            action_logits = output.logits[:, wrapped_model.module.vla.vision_backbone.featurizer.patch_embed.num_patches : -1]
+            action_preds = action_logits.argmax(dim=2)
+            action_gt = batch["labels"][:, 1:].to(action_preds.device)
+            mask = action_gt > 32000
 
-                # Compute Accuracy
-                correct_preds = (action_preds == action_gt) & mask
-                action_accuracy = correct_preds.sum().float() / mask.sum().float()
+            # Compute Accuracy
+            correct_preds = (action_preds == action_gt) & mask
+            action_accuracy = correct_preds.sum().float() / mask.sum().float()
 
-                # Store recent train metrics
-                recent_losses.append(loss.item())
-                recent_action_accuracies.append(action_accuracy.item())
+            # Store recent train metrics
+            recent_losses.append(loss.item())
+            recent_action_accuracies.append(action_accuracy.item())
 
-                # Compute gradient step index
-                gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+            # Compute gradient step index
+            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
 
-                # Compute smoothened train metrics
-                #   =>> Equal to current step metrics when not using gradient accumulation
-                #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
-                smoothened_loss = sum(recent_losses) / len(recent_losses)
-                smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+            # Compute smoothened train metrics
+            #   =>> Equal to current step metrics when not using gradient accumulation
+            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
+            smoothened_loss = sum(recent_losses) / len(recent_losses)
+            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
 
-                if distributed_state.is_main_process and gradient_step_idx % 5 == 0:
-                    wandb.log(
-                        {
-                            "train_loss": smoothened_loss,
-                            "latent_action_accuracy": smoothened_action_accuracy,
-                            "action_loss": act_loss.item(),
-                            "action_loss_1step": loss_one_step.item(),
-                            "lr": optimizer.state_dict()['param_groups'][0]['lr'],
-                        },
-                        step=gradient_step_idx,
-                    )
+            if distributed_state.is_main_process and gradient_step_idx % 5 == 0:
+                wandb.log(
+                    {
+                        "train_loss": smoothened_loss,
+                        "latent_action_accuracy": smoothened_action_accuracy,
+                        "action_loss": act_loss.item(),
+                        "action_loss_1step": loss_one_step.item(),
+                        "lr": optimizer.state_dict()['param_groups'][0]['lr'],
+                    },
+                    step=gradient_step_idx,
+                )
 
-                # Optimizer Step
-                if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    progress.update()
+            # Optimizer Step
+            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                progress.update()
 
-                # Save Model Checkpoint
-                if (gradient_step_idx + current_step) > 0 and (gradient_step_idx + current_step) % cfg.save_steps == 0:
-                    step = gradient_step_idx + current_step
-                    print(f"Process {distributed_state.process_index}: Reached checkpoint step {step}.")
+            # Save Model Checkpoint
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                step = gradient_step_idx
+                print(f"Process {distributed_state.process_index}: Reached checkpoint step {step}.")
 
-                    # 이 체크포인트를 위한 경로들을 명확히 정의합니다.
-                    checkpoint_run_dir = run_dir / str(step)
-                    checkpoint_adapter_dir = adapter_dir / str(step)
+                # 이 체크포인트를 위한 경로들을 명확히 정의합니다.
+                checkpoint_run_dir = run_dir / str(step)
+                checkpoint_adapter_dir = adapter_dir / str(step)
 
-                    # 메인 프로세스만 파일 쓰기 작업을 수행합니다.
-                    if distributed_state.is_main_process: 
-                        print(f"Saving Model Checkpoint for Step {step}")
+                # 메인 프로세스만 파일 쓰기 작업을 수행합니다.
+                if distributed_state.is_main_process: 
+                    print(f"Saving Model Checkpoint for Step {step}")
 
-                        # ★★★핵심 수정: LoRA 어댑터를 저장할 폴더를 명시적으로 생성합니다.
-                        os.makedirs(checkpoint_run_dir, exist_ok=True)
-                        if cfg.use_lora:
-                            os.makedirs(checkpoint_adapter_dir, exist_ok=True)
-                            
-                        # LoRA 어댑터 가중치를 임시 어댑터 폴더에 저장합니다.
-                        if cfg.use_lora and not cfg.freeze_vla:
-                            wrapped_model.module.vla.save_pretrained(checkpoint_adapter_dir)
-                            
-                        # Action Decoder 가중치를 메인 결과 폴더에 저장합니다.
-                        decoder_save_path = checkpoint_run_dir / f'action_decoder-{step}.pt'
-                        torch.save(wrapped_model.module.action_decoder.state_dict(), decoder_save_path)
-                        
-                        # 프로세서 설정 파일도 메인 결과 폴더에 저장합니다.
-                        processor.save_pretrained(checkpoint_run_dir)
-
-                    # 모든 프로세스가 메인 프로세스의 저장이 끝날 때까지 기다립니다.
-                    dist.barrier()
-
-                    # LoRA 가중치를 기본 모델과 병합하여 전체 모델 체크포인트를 저장합니다.
+                    # ★★★핵심 수정: LoRA 어댑터를 저장할 폴더를 명시적으로 생성합니다.
+                    os.makedirs(checkpoint_run_dir, exist_ok=True)
                     if cfg.use_lora:
-                        # 모든 프로세스가 기본 VLA 모델을 다시 불러옵니다.
-                        base_vla = AutoModelForVision2Seq.from_pretrained(
-                            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-                        )
+                        os.makedirs(checkpoint_adapter_dir, exist_ok=True)
                         
-                        # 방금 저장한 어댑터 가중치를 불러와서 병합합니다.
-                        merged_vla = PeftModel.from_pretrained(base_vla, checkpoint_adapter_dir)
-                        merged_vla = merged_vla.merge_and_unload()
+                    # LoRA 어댑터 가중치를 임시 어댑터 폴더에 저장합니다.
+                    if cfg.use_lora and not cfg.freeze_vla:
+                        wrapped_model.module.vla.save_pretrained(checkpoint_adapter_dir)
                         
-                        if distributed_state.is_main_process:
-                            # 병합된 전체 모델을 메인 결과 폴더에 저장합니다.
-                            merged_vla.save_pretrained(checkpoint_run_dir)
-                            print(f"Saved Merged Model Checkpoint for Step {step} at: {checkpoint_run_dir}")
+                    # Action Decoder 가중치를 메인 결과 폴더에 저장합니다.
+                    decoder_save_path = checkpoint_run_dir / f'action_decoder-{step}.pt'
+                    torch.save(wrapped_model.module.action_decoder.state_dict(), decoder_save_path)
+                    
+                    # 프로세서 설정 파일도 메인 결과 폴더에 저장합니다.
+                    processor.save_pretrained(checkpoint_run_dir)
 
-                    # 모든 프로세스가 병합 및 저장이 끝날 때까지 기다립니다.
-                    dist.barrier()
+                # 모든 프로세스가 메인 프로세스의 저장이 끝날 때까지 기다립니다.
+                dist.barrier()
 
-            description = f"Step {current_step + 1} | train_loss: {smoothened_loss:.3f} | latent_action_accuracy: {smoothened_action_accuracy:.3f} | action_loss: {act_loss.item():.3f} | action_loss_1step: {loss_one_step.item():.3f}"
+                # LoRA 가중치를 기본 모델과 병합하여 전체 모델 체크포인트를 저장합니다.
+                if cfg.use_lora:
+                    # 모든 프로세스가 기본 VLA 모델을 다시 불러옵니다.
+                    base_vla = AutoModelForVision2Seq.from_pretrained(
+                        cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+                    )
+                    
+                    # 방금 저장한 어댑터 가중치를 불러와서 병합합니다.
+                    merged_vla = PeftModel.from_pretrained(base_vla, checkpoint_adapter_dir)
+                    merged_vla = merged_vla.merge_and_unload()
+                    
+                    if distributed_state.is_main_process:
+                        # 병합된 전체 모델을 메인 결과 폴더에 저장합니다.
+                        merged_vla.save_pretrained(checkpoint_run_dir)
+                        print(f"Saved Merged Model Checkpoint for Step {step} at: {checkpoint_run_dir}")
+
+                # 모든 프로세스가 병합 및 저장이 끝날 때까지 기다립니다.
+                dist.barrier()
+
+            description = f"Step {gradient_step_idx + 1} | train_loss: {smoothened_loss:.3f} | latent_action_accuracy: {smoothened_action_accuracy:.3f} | action_loss: {act_loss.item():.3f} | action_loss_1step: {loss_one_step.item():.3f}"
             progress.set_description(description)
 
-            current_step = gradient_step_idx + 1 + current_step
             # Stop training when max_steps is reached
-            if current_step >= cfg.max_steps:
+            if gradient_step_idx >= cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 wandb.finish()
                 break
