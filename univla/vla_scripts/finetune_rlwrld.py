@@ -3,6 +3,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import itertools
 
 import draccus
 import torch
@@ -474,8 +475,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         wrapped_model.train()
         optimizer.zero_grad()
+        global_step = 0          # 대신 current/gradient 혼용 금지
+        gradient_step_idx = 0
+        data_iter = itertools.cycle(dataloader)   # 무한 반복
 
-        for batch_idx, batch in enumerate(dataloader):
+        while gradient_step_idx <= cfg.max_steps:
+            batch = next(data_iter)
             batch["initial_pixel_values"] = batch["initial_pixel_values"].to(device_id)
             batch["target_pixel_values"] = batch["target_pixel_values"].to(device_id)
             batch["pixel_values"] = batch["pixel_values"].to(torch.bfloat16).to(device_id)
@@ -545,6 +550,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                 input_ids_list = []
                 labels_list = []
+                if latent_action_idx_batch.ndim == 1:
+                    latent_action_idx_batch = latent_action_idx_batch.unsqueeze(0)
+                    
                 for idx, latent_action_idx in enumerate(latent_action_idx_batch):
                     action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
 
@@ -612,7 +620,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             recent_action_accuracies.append(action_accuracy.item())
 
             # Compute gradient step index
-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+            gradient_step_idx = global_step // cfg.grad_accumulation_steps
 
             # Compute smoothened train metrics
             #   =>> Equal to current step metrics when not using gradient accumulation
@@ -633,7 +641,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 )
 
             # Optimizer Step
-            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+            if (global_step + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
@@ -690,6 +698,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # 모든 프로세스가 병합 및 저장이 끝날 때까지 기다립니다.
                 dist.barrier()
 
+            global_step += 1
             description = f"Step {gradient_step_idx + 1} | train_loss: {smoothened_loss:.3f} | latent_action_accuracy: {smoothened_action_accuracy:.3f} | action_loss: {act_loss.item():.3f} | action_loss_1step: {loss_one_step.item():.3f}"
             progress.set_description(description)
 
