@@ -98,6 +98,7 @@ class UniVLAInference:
         # 4. Prompt Builder 준비
         self.prompt_builder = PurePromptBuilder("openvla")
         self.reset("Placeholder Task")
+        self.prev_hist_action = ['']
 
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
@@ -119,7 +120,11 @@ class UniVLAInference:
 
         # 1. 프롬프트 생성
         prompt_builder = PurePromptBuilder("openvla")
-        prompt = f"What action should the robot take to {task_description.lower()}?"
+        if len(self.prev_hist_action[-1]) > 0:
+            prompt = f"In: What action should the robot take to {task_description.lower()}? History action {self.prev_hist_action[-1]}\nOut:"
+        else:
+            prompt = f"In: What action should the robot take to {task_description.lower()}?\nOut:"
+
         conversation = [
             {"from": "human", "value": prompt},
             {"from": "gpt", "value": ""},
@@ -136,18 +141,23 @@ class UniVLAInference:
 
         # 3. VLA 순전파 (Latent Action 예측)
         with torch.no_grad():
-            vla_output = self.vla.forward(**inputs, output_hidden_states=True)
-            
-        # 4. Action Decoder 순전파 (실제 Action 예측)
-        with torch.no_grad():
-            # ★★★ 핵심 수정: .to(torch.float)을 제거하고, 모든 텐서가 bfloat16을 유지하도록 보장합니다. ★★★
-            visual_embed = vla_output.hidden_states[-1][:, : self.vla.vision_backbone.featurizer.patch_embed.num_patches]
-            latent_tokens = vla_output.hidden_states[-1][:, self.vla.vision_backbone.featurizer.patch_embed.num_patches:]
-            
+            latent_action_tokens, visual_embed, generated_ids = self.vla.predict_latent_action(
+                **inputs,
+                # unnorm_key=self.unnorm_key,      # 필요 없다면 제거
+                do_sample=True,
+                temperature=0.75,
+                top_p=0.9,
+            )
             # 명시적으로 타입을 맞춰줍니다.
-            latent_action_tokens = latent_tokens.to(dtype=torch.bfloat16)
+            latent_action_tokens = latent_action_tokens.to(dtype=torch.bfloat16)
             visual_embed = visual_embed.to(dtype=torch.bfloat16)
             proprio_bfloat16 = proprio.to(dtype=torch.bfloat16)
+
+            latent_action_detokenize = [f'<ACT_{i}>' for i in range(32)]
+            hist_action = ''
+            for latent_action_ids in generated_ids[0]:
+                hist_action += latent_action_detokenize[latent_action_ids.item() - 32001]
+            self.prev_hist_action.append(hist_action)
             
             if proprio_bfloat16.dim() == 1:
                 proprio_bfloat16 = proprio_bfloat16.unsqueeze(0)
